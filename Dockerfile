@@ -6,17 +6,30 @@
 #
 # The image expects a pre-built database at /app/data/anspdcp.db.
 # Override with ANSPDCP_DB_PATH for a custom location.
+#
+# Multi-stage to preserve better-sqlite3 native binding (postinstall builds
+# the .node addon — must NOT be re-installed in production with --ignore-scripts).
 # ─────────────────────────────────────────────────────────────────────────────
 
-# --- Stage 1: Build TypeScript ---
+# --- Stage 1: Build TypeScript and install full deps (with native bindings) ---
 FROM node:20-slim AS builder
 
 WORKDIR /app
+
+# Install build toolchain for native modules (better-sqlite3 postinstall)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      python3 make g++ \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY package.json package-lock.json* ./
-RUN npm ci --ignore-scripts
+RUN npm ci
+
 COPY tsconfig.json ./
 COPY src/ src/
 RUN npm run build
+
+# Prune dev deps but keep native bindings intact
+RUN npm prune --omit=dev
 
 # --- Stage 2: Production ---
 FROM node:20-slim AS production
@@ -25,10 +38,13 @@ WORKDIR /app
 ENV NODE_ENV=production
 ENV ANSPDCP_DB_PATH=/app/data/anspdcp.db
 
-COPY package.json package-lock.json* ./
-RUN npm ci --omit=dev --ignore-scripts && npm cache clean --force
+# Copy production node_modules (with built better-sqlite3 binding) from builder
+COPY --from=builder /app/node_modules ./node_modules
+COPY --from=builder /app/package.json ./package.json
+COPY --from=builder /app/dist/ ./dist/
 
-COPY --from=builder /app/dist/ dist/
+# Provision database (CI gunzips data/database.db.gz from release into data/database.db)
+COPY data/database.db data/anspdcp.db
 
 # Non-root user for security
 RUN addgroup --system --gid 1001 mcp && \
